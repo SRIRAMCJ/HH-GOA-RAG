@@ -4,14 +4,15 @@ The dataset is never committed to GitHub. The builder runs on cloud/CI
 infrastructure, creates four chunking variants, and writes a portable FAISS +
 BM25 artifact bundle.
 
-MSMARCO-XI publishes language-specific JSONL files. We download the requested
-file directly from the dataset repository instead of relying on the deprecated
-loading-script configuration mechanism in newer `datasets` releases.
+MSMARCO-XI stores language-specific JSONL files under train/ and
+validation/. We stream the requested file directly so --max-docs does not
+require downloading the multi-GB source file in full.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,7 +20,8 @@ from typing import Any, Iterable
 
 import faiss
 import numpy as np
-from huggingface_hub import hf_hub_download
+import requests
+from huggingface_hub import hf_hub_url
 from sentence_transformers import SentenceTransformer
 
 DATASET_ID = "ai4bharat/MSMARCO-XI"
@@ -57,12 +59,7 @@ def fixed_chunks(text: str, words: int = 120, overlap: int = 30) -> Iterable[str
 
 
 def make_chunks(document_id: str, text: str, metadata: dict[str, Any]) -> list[Chunk]:
-    """Create the four required chunking variants.
-
-    `semantic` is deliberately deterministic for the indexing benchmark: it
-    groups adjacent sentences into larger topical windows without requiring a
-    second embedding pass during ingestion.
-    """
+    """Create the four deterministic chunking variants."""
     sents = sentence_split(text)
     chunks: list[Chunk] = []
 
@@ -106,12 +103,27 @@ def passage_texts(row: dict[str, Any]) -> list[tuple[str, str]]:
 
 def dataset_filename(config: str, split: str) -> str:
     if split == "train":
-        suffix = "train"
-    elif split in {"validation", "val"}:
-        suffix = "val"
-    else:
-        raise ValueError("MSMARCO-XI supports train/validation files for this builder")
-    return f"{split if split == 'train' else 'validation'}/{config}{suffix}.jsonl"
+        return f"train/{config}train.jsonl"
+    if split in {"validation", "val"}:
+        return f"validation/{config}val.jsonl"
+    raise ValueError("MSMARCO-XI supports train/validation files")
+
+
+def stream_rows(config: str, split: str, max_docs: int) -> Iterable[dict[str, Any]]:
+    """Stream only the first max_docs JSONL rows from Hugging Face."""
+    filename = dataset_filename(config, split)
+    url = hf_hub_url(DATASET_ID, filename=filename, repo_type="dataset")
+    token = os.getenv("HF_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    with requests.get(url, headers=headers, stream=True, timeout=(30, 300)) as response:
+        response.raise_for_status()
+        for idx, raw_line in enumerate(response.iter_lines(decode_unicode=True)):
+            if idx >= max_docs:
+                break
+            if not raw_line or not raw_line.strip():
+                continue
+            yield json.loads(raw_line)
 
 
 def main() -> None:
@@ -128,48 +140,36 @@ def main() -> None:
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-
     filename = dataset_filename(args.config, args.split)
-    dataset_path = hf_hub_download(
-        repo_id=DATASET_ID,
-        filename=filename,
-        repo_type="dataset",
-        token=None,
-    )
-    print(f"Using dataset file: {filename}")
+    print(f"Streaming dataset file: {filename}")
 
     chunks: list[Chunk] = []
-    with open(dataset_path, "r", encoding="utf-8") as source:
-        for idx, line in enumerate(source):
-            if idx >= args.max_docs:
-                break
-            if not line.strip():
-                continue
+    rows_read = 0
+    for idx, row in enumerate(stream_rows(args.config, args.split, args.max_docs)):
+        rows_read = idx + 1
+        query_id = normalize_text(row.get("query_id") or idx)
+        target_lang = normalize_text(row.get("target_lang") or args.config)
 
-            row = json.loads(line)
-            query_id = normalize_text(row.get("query_id") or idx)
-            target_lang = normalize_text(row.get("target_lang") or args.config)
-
-            for passage_id, text in passage_texts(row):
-                metadata = {
-                    "dataset": DATASET_ID,
-                    "config": args.config,
-                    "target_lang": target_lang,
-                    "query_id": query_id,
-                    "query": normalize_text(row.get("query")),
-                    "english_query": normalize_text(row.get("Eng_Query")),
-                    "answer": normalize_text(row.get("Answer")),
-                    "english_answer": normalize_text(row.get("Eng_Answer")),
-                    "query_type": normalize_text(row.get("query_type")),
-                    "passage_id": passage_id,
-                }
-                chunks.extend(make_chunks(f"{query_id}:{passage_id}", text, metadata))
+        for passage_id, text in passage_texts(row):
+            metadata = {
+                "dataset": DATASET_ID,
+                "config": args.config,
+                "target_lang": target_lang,
+                "query_id": query_id,
+                "query": normalize_text(row.get("query")),
+                "english_query": normalize_text(row.get("Eng_Query")),
+                "answer": normalize_text(row.get("Answer")),
+                "english_answer": normalize_text(row.get("Eng_Answer")),
+                "query_type": normalize_text(row.get("query_type")),
+                "passage_id": passage_id,
+            }
+            chunks.extend(make_chunks(f"{query_id}:{passage_id}", text, metadata))
 
     if not chunks:
         raise RuntimeError("No passages were found. Verify the language code and split.")
 
     texts = [c.text for c in chunks]
-    print(f"Created {len(chunks)} chunks from {min(args.max_docs, idx + 1)} dataset rows")
+    print(f"Created {len(chunks)} chunks from {rows_read} dataset rows")
 
     model = SentenceTransformer(args.embedding_model)
     embeddings = model.encode(
@@ -197,7 +197,7 @@ def main() -> None:
         "source_file": filename,
         "config": args.config,
         "split": args.split,
-        "documents_indexed": min(args.max_docs, idx + 1),
+        "documents_indexed": rows_read,
         "chunks": len(chunks),
         "embedding_model": args.embedding_model,
         "dimension": int(matrix.shape[1]),
