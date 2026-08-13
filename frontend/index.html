@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HH Goa RAG</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <p class="eyebrow">HACKER HOUSE GOA 2026</p>
+      <h1>Voice RAG</h1>
+      <p class="subtitle">Ask a question. Retrieve evidence. Get a grounded answer.</p>
+    </header>
+
+    <section class="card voice-card">
+      <button id="record" class="record" aria-label="Record voice question">🎙️</button>
+      <p id="recordState">Press to record</p>
+      <div class="or">or</div>
+      <textarea id="query" rows="3" placeholder="Type your question..."></textarea>
+      <button id="ask" class="ask">Ask RAG →</button>
+    </section>
+
+    <section id="answerCard" class="card answer hidden">
+      <div class="metrics">
+        <span id="grounded">—</span>
+        <span id="latency">—</span>
+      </div>
+      <h2>Answer</h2>
+      <p id="answer"></p>
+      <div id="sources"></div>
+    </section>
+
+    <footer>#RAGInGoa · Voice-enabled Retrieval-Augmented Generation</footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
