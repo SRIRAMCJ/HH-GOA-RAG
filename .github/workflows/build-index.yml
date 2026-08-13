@@ -25,10 +25,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install CPU PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install indexing dependencies
         working-directory: backend
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Build index on GitHub runner
