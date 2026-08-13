@@ -1,10 +1,8 @@
-"""Inspect the official HH Goa MSMARCO-XI dataset without downloading it in full.
+"""Inspect the official AI4Bharat MSMARCO-XI dataset files.
 
-Usage:
-  python scripts/inspect_dataset.py --rows 5
-
-The script uses Hugging Face streaming so the developer machine never needs the
-full dataset. It prints configs/splits and a few normalized example records.
+MSMARCO-XI publishes one JSONL train/validation file per language. This
+inspector uses the Hub file API directly so it works with current versions of
+`datasets` even when the legacy dataset loading script is not executed.
 """
 from __future__ import annotations
 
@@ -12,9 +10,25 @@ import argparse
 import json
 from typing import Any
 
-from datasets import get_dataset_config_names, get_dataset_split_names, load_dataset
+from huggingface_hub import hf_hub_download
 
 DATASET_ID = "ai4bharat/MSMARCO-XI"
+LANGUAGES = {
+    "as": "Assamese",
+    "bn": "Bengali",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "sa": "Sanskrit",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ur": "Urdu",
+}
 
 
 def compact(value: Any, limit: int = 500) -> Any:
@@ -29,27 +43,28 @@ def compact(value: Any, limit: int = 500) -> Any:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", choices=sorted(LANGUAGES), default="ta")
+    parser.add_argument("--split", choices=["train", "validation"], default="train")
     parser.add_argument("--rows", type=int, default=5)
     args = parser.parse_args()
 
-    configs = get_dataset_config_names(DATASET_ID)
+    suffix = "train" if args.split == "train" else "val"
+    folder = "train" if args.split == "train" else "validation"
+    filename = f"{folder}/{args.config}{suffix}.jsonl"
+
     print("DATASET:", DATASET_ID)
-    print("CONFIGS:", json.dumps(configs, ensure_ascii=False))
+    print("LANGUAGES:", json.dumps(LANGUAGES, ensure_ascii=False))
+    print("SELECTED:", args.config, LANGUAGES[args.config], args.split)
+    print("FILE:", filename)
 
-    for config in configs:
-        splits = get_dataset_split_names(DATASET_ID, config)
-        print(f"CONFIG={config} SPLITS={splits}")
-
-    # Use the first available config/split only for a tiny schema/sample inspection.
-    config = configs[0]
-    split = get_dataset_split_names(DATASET_ID, config)[0]
-    stream = load_dataset(DATASET_ID, config, split=split, streaming=True)
-    print("SELECTED:", config, split)
-
-    for i, row in enumerate(stream):
-        print(json.dumps(compact(row), ensure_ascii=False, indent=2, default=str))
-        if i + 1 >= args.rows:
-            break
+    path = hf_hub_download(repo_id=DATASET_ID, filename=filename, repo_type="dataset", token=None)
+    with open(path, "r", encoding="utf-8") as source:
+        for i, line in enumerate(source):
+            if not line.strip():
+                continue
+            print(json.dumps(compact(json.loads(line)), ensure_ascii=False, indent=2, default=str))
+            if i + 1 >= args.rows:
+                break
 
 
 if __name__ == "__main__":
