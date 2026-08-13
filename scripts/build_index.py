@@ -1,8 +1,12 @@
-"""Build a reproducible RAG index from streamed AI4Bharat MSMARCO-XI data.
+"""Build a reproducible RAG index from AI4Bharat MSMARCO-XI data.
 
 The dataset is never committed to GitHub. The builder runs on cloud/CI
 infrastructure, creates four chunking variants, and writes a portable FAISS +
 BM25 artifact bundle.
+
+MSMARCO-XI publishes language-specific JSONL files. We download the requested
+file directly from the dataset repository instead of relying on the deprecated
+loading-script configuration mechanism in newer `datasets` releases.
 """
 from __future__ import annotations
 
@@ -15,8 +19,7 @@ from typing import Any, Iterable
 
 import faiss
 import numpy as np
-from datasets import load_dataset
-from rank_bm25 import BM25Okapi
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
 
 DATASET_ID = "ai4bharat/MSMARCO-XI"
@@ -54,20 +57,31 @@ def fixed_chunks(text: str, words: int = 120, overlap: int = 30) -> Iterable[str
 
 
 def make_chunks(document_id: str, text: str, metadata: dict[str, Any]) -> list[Chunk]:
+    """Create the four required chunking variants.
+
+    `semantic` is deliberately deterministic for the indexing benchmark: it
+    groups adjacent sentences into larger topical windows without requiring a
+    second embedding pass during ingestion.
+    """
     sents = sentence_split(text)
     chunks: list[Chunk] = []
+
     for i in range(0, len(sents), 5):
         body = " ".join(sents[i:i + 5])
         if body:
             chunks.append(Chunk(f"{document_id}:sentence:{i}", document_id, "sentence", body, metadata))
+
     for i, body in enumerate(fixed_chunks(text)):
         chunks.append(Chunk(f"{document_id}:sliding:{i}", document_id, "sliding_window", body, metadata))
+
     if text:
         chunks.append(Chunk(f"{document_id}:metadata:0", document_id, "metadata_aware", text[:1800], metadata))
+
     for i in range(0, len(sents), 8):
         body = " ".join(sents[i:i + 8])
         if body:
             chunks.append(Chunk(f"{document_id}:semantic:{i}", document_id, "semantic", body, metadata))
+
     return chunks
 
 
@@ -76,55 +90,94 @@ def passage_texts(row: dict[str, Any]) -> list[tuple[str, str]]:
     translated = passages.get("Translated_passages") or []
     english = passages.get("English_passages") or []
     out: list[tuple[str, str]] = []
+
     for i, value in enumerate(translated):
         text = normalize_text(value)
         if text:
             out.append((f"translated:{i}", text))
+
     for i, value in enumerate(english):
         text = normalize_text(value)
         if text:
             out.append((f"english:{i}", text))
+
     return out
+
+
+def dataset_filename(config: str, split: str) -> str:
+    if split == "train":
+        suffix = "train"
+    elif split in {"validation", "val"}:
+        suffix = "val"
+    else:
+        raise ValueError("MSMARCO-XI supports train/validation files for this builder")
+    return f"{split if split == 'train' else 'validation'}/{config}{suffix}.jsonl"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="ta", help="MSMARCO-XI language config, e.g. ta, hi, en-compatible content")
-    parser.add_argument("--split", default="train")
+    parser.add_argument("--config", default="ta", help="MSMARCO-XI language code, e.g. ta, hi, bn")
+    parser.add_argument("--split", default="train", choices=["train", "validation", "val"])
     parser.add_argument("--max-docs", type=int, default=5000)
     parser.add_argument("--output", default="artifacts/index")
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING)
     args = parser.parse_args()
 
+    if args.max_docs <= 0:
+        raise ValueError("--max-docs must be greater than zero")
+
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    ds = load_dataset(DATASET_ID, args.config, split=args.split, streaming=True)
-    chunks: list[Chunk] = []
 
-    for idx, raw in enumerate(ds):
-        if idx >= args.max_docs:
-            break
-        row = dict(raw)
-        query_id = normalize_text(row.get("query_id") or idx)
-        target_lang = normalize_text(row.get("target_lang") or args.config)
-        for passage_id, text in passage_texts(row):
-            metadata = {
-                "dataset": DATASET_ID,
-                "config": args.config,
-                "target_lang": target_lang,
-                "query_id": query_id,
-                "query": normalize_text(row.get("query")),
-                "english_query": normalize_text(row.get("Eng_Query")),
-                "passage_id": passage_id,
-            }
-            chunks.extend(make_chunks(f"{query_id}:{passage_id}", text, metadata))
+    filename = dataset_filename(args.config, args.split)
+    dataset_path = hf_hub_download(
+        repo_id=DATASET_ID,
+        filename=filename,
+        repo_type="dataset",
+        token=None,
+    )
+    print(f"Using dataset file: {filename}")
+
+    chunks: list[Chunk] = []
+    with open(dataset_path, "r", encoding="utf-8") as source:
+        for idx, line in enumerate(source):
+            if idx >= args.max_docs:
+                break
+            if not line.strip():
+                continue
+
+            row = json.loads(line)
+            query_id = normalize_text(row.get("query_id") or idx)
+            target_lang = normalize_text(row.get("target_lang") or args.config)
+
+            for passage_id, text in passage_texts(row):
+                metadata = {
+                    "dataset": DATASET_ID,
+                    "config": args.config,
+                    "target_lang": target_lang,
+                    "query_id": query_id,
+                    "query": normalize_text(row.get("query")),
+                    "english_query": normalize_text(row.get("Eng_Query")),
+                    "answer": normalize_text(row.get("Answer")),
+                    "english_answer": normalize_text(row.get("Eng_Answer")),
+                    "query_type": normalize_text(row.get("query_type")),
+                    "passage_id": passage_id,
+                }
+                chunks.extend(make_chunks(f"{query_id}:{passage_id}", text, metadata))
 
     if not chunks:
-        raise RuntimeError("No passages were found. Verify the config/split with inspect_dataset.py.")
+        raise RuntimeError("No passages were found. Verify the language code and split.")
 
     texts = [c.text for c in chunks]
+    print(f"Created {len(chunks)} chunks from {min(args.max_docs, idx + 1)} dataset rows")
+
     model = SentenceTransformer(args.embedding_model)
-    embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=True, batch_size=64)
+    embeddings = model.encode(
+        texts,
+        normalize_embeddings=True,
+        show_progress_bar=True,
+        batch_size=64,
+    )
     matrix = np.asarray(embeddings, dtype="float32")
 
     index = faiss.IndexFlatIP(matrix.shape[1])
@@ -141,9 +194,10 @@ def main() -> None:
 
     manifest = {
         "dataset": DATASET_ID,
+        "source_file": filename,
         "config": args.config,
         "split": args.split,
-        "documents": args.max_docs,
+        "documents_indexed": min(args.max_docs, idx + 1),
         "chunks": len(chunks),
         "embedding_model": args.embedding_model,
         "dimension": int(matrix.shape[1]),
