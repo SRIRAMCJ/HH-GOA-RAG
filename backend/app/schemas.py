@@ -1,4 +1,5 @@
 from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -14,6 +15,7 @@ class Source(BaseModel):
     text: str
     score: float
     strategy: str
+    metadata: dict = Field(default_factory=dict)
 
 
 class QueryResponse(BaseModel):
@@ -22,9 +24,9 @@ class QueryResponse(BaseModel):
     confidence: float
     refused: bool = False
     refusal_reason: str | None = None
-    sources: list[Source] = []
+    sources: list[Source] = Field(default_factory=list)
     latency_ms: float
-    stages_ms: dict[str, float] = {}
+    stages_ms: dict[str, float] = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
