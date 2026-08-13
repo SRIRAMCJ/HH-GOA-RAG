@@ -3,6 +3,8 @@ from typing import Sequence
 
 from rank_bm25 import BM25Okapi
 
+from app.retrieval.index_store import DenseIndex
+
 
 @dataclass(slots=True)
 class IndexedChunk:
@@ -10,6 +12,7 @@ class IndexedChunk:
     document_id: str
     text: str
     strategy: str
+    metadata: dict | None = None
 
 
 @dataclass(slots=True)
@@ -20,15 +23,11 @@ class RetrievedChunk:
 
 
 class HybridRetriever:
-    """Combines lexical BM25 with a pluggable dense retriever.
+    """BM25 + FAISS dense retrieval with reciprocal-rank fusion."""
 
-    Dense retrieval is deliberately injected so the online service can use a
-    hosted embedding service or a prebuilt FAISS index without changing the
-    orchestration layer.
-    """
-
-    def __init__(self, chunks: Sequence[IndexedChunk]):
+    def __init__(self, chunks: Sequence[IndexedChunk], dense_index: DenseIndex | None = None):
         self.chunks = list(chunks)
+        self.dense_index = dense_index
         self._bm25 = BM25Okapi([c.text.lower().split() for c in self.chunks]) if self.chunks else None
 
     def lexical_search(self, query: str, top_k: int = 20) -> list[RetrievedChunk]:
@@ -38,8 +37,12 @@ class HybridRetriever:
         ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
         return [RetrievedChunk(self.chunks[i], float(score), "bm25") for i, score in ranked]
 
+    def dense_search(self, vector, top_k: int = 20) -> list[RetrievedChunk]:
+        if self.dense_index is None:
+            return []
+        return self.dense_index.search(vector, top_k)
+
     def fuse(self, dense: Sequence[RetrievedChunk], lexical: Sequence[RetrievedChunk], top_k: int = 20) -> list[RetrievedChunk]:
-        # Reciprocal Rank Fusion is robust across score scales from different retrievers.
         fused: dict[str, float] = {}
         objects: dict[str, RetrievedChunk] = {}
         for results in (dense, lexical):
