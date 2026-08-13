@@ -11,6 +11,7 @@ sentence-transformers>=3.4,<6
 transformers>=4.51,<6
 datasets>=3.2,<5
 huggingface-hub>=0.28,<1
+pyarrow>=18,<26
 python-dotenv>=1.0,<2
 orjson>=3.10,<4
 requests>=2.32,<3
