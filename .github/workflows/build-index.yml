@@ -1,0 +1,50 @@
+name: Build MSMARCO-XI RAG Index
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "MSMARCO-XI language config"
+        required: true
+        default: "ta"
+      max_docs:
+        description: "Number of dataset rows to index"
+        required: true
+        default: "5000"
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install indexing dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build index on GitHub runner
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/build_index.py \
+            --config "${{ inputs.config }}" \
+            --split train \
+            --max-docs "${{ inputs.max_docs }}" \
+            --output artifacts/index
+
+      - name: Upload index artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: msmarco-xi-index-${{ inputs.config }}
+          path: artifacts/index/
+          if-no-files-found: error
+          retention-days: 7
