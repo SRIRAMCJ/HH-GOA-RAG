@@ -34,9 +34,9 @@ class HuggingFaceGenerator:
             messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=220,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         content = (response.choices[0].message.content or "").strip()
-        # Some hosted models wrap JSON in a markdown fence. Strip only the fence.
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
         try:
             data = json.loads(content)
