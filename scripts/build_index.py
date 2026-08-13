@@ -1,22 +1,24 @@
 """Build a reproducible RAG index from AI4Bharat MSMARCO-XI data.
 
 The dataset is never committed to GitHub. The builder runs on cloud/CI,
-streams the requested language Parquet file, creates four chunking variants,
-and writes a portable FAISS + BM25 artifact bundle.
+downloads the requested language Parquet file to the runner, reads it with
+PyArrow in batches, creates four chunking variants, and writes a portable
+FAISS + BM25 artifact bundle.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from datasets import load_dataset
 import faiss
 import numpy as np
-from huggingface_hub import hf_hub_url
+import pyarrow.parquet as pq
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
 
 DATASET_ID = "ai4bharat/MSMARCO-XI"
@@ -134,24 +136,42 @@ def dataset_filename(config: str, split: str) -> str:
     raise ValueError("MSMARCO-XI supports train/validation files")
 
 
-def stream_rows(config: str, split: str, max_docs: int):
-    """Stream Parquet rows from Hugging Face without downloading the full file."""
-    filename = dataset_filename(config, split)
-    url = hf_hub_url(DATASET_ID, filename=filename, repo_type="dataset")
-    token = __import__("os").getenv("HF_TOKEN")
+def iter_rows(config: str, split: str, max_docs: int):
+    """Download the Parquet file once and read only the required rows in batches.
 
-    dataset = load_dataset(
-        "parquet",
-        data_files={"data": url},
-        split="data",
-        streaming=True,
+    This deliberately avoids ``datasets.load_dataset(..., streaming=True)``.
+    The Hugging Face streaming path was observed to stall before yielding the
+    first row in GitHub Actions, while the same runner can successfully fetch
+    this Parquet file with ``hf_hub_download``.
+    """
+    filename = dataset_filename(config, split)
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN is required to download MSMARCO-XI from Hugging Face")
+
+    print(f"Downloading dataset file to the GitHub runner: {filename}")
+    parquet_path = hf_hub_download(
+        repo_id=DATASET_ID,
+        filename=filename,
+        repo_type="dataset",
         token=token,
     )
+    file_size = Path(parquet_path).stat().st_size
+    print(f"Local Parquet path: {parquet_path}")
+    print(f"Local Parquet size: {file_size / (1024 ** 3):.2f} GiB")
 
-    for idx, row in enumerate(dataset):
-        if idx >= max_docs:
-            break
-        yield row
+    parquet_file = pq.ParquetFile(parquet_path)
+    print(f"Parquet rows: {parquet_file.metadata.num_rows}")
+    print(f"Parquet row groups: {parquet_file.metadata.num_row_groups}")
+    print(f"Parquet columns: {parquet_file.schema_arrow.names}")
+
+    yielded = 0
+    for batch in parquet_file.iter_batches(batch_size=1000):
+        for row in batch.to_pylist():
+            if yielded >= max_docs:
+                return
+            yield row
+            yielded += 1
 
 
 def main() -> None:
@@ -169,11 +189,10 @@ def main() -> None:
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     filename = dataset_filename(args.config, args.split)
-    print(f"Streaming dataset file: {filename}")
 
     chunks: list[Chunk] = []
     rows_read = 0
-    for idx, row in enumerate(stream_rows(args.config, args.split, args.max_docs)):
+    for idx, row in enumerate(iter_rows(args.config, args.split, args.max_docs)):
         rows_read = idx + 1
         query_id = normalize_text(row.get("query_id") or idx)
         target_lang = normalize_text(row.get("target_lang") or args.config)
