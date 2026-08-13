@@ -1,0 +1,196 @@
+name: Diagnose Parquet Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: 'MSMARCO-XI config to test'
+        required: true
+        default: 'ta'
+      test_mode:
+        description: 'Download test mode'
+        required: true
+        type: choice
+        options:
+          - range
+          - full
+        default: range
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install diagnostic dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install huggingface_hub pyarrow requests
+
+      - name: Print runner resources
+        run: |
+          echo '=== MEMORY ==='
+          free -h
+          echo '=== DISK ==='
+          df -h .
+          echo '=== CPU ==='
+          nproc
+
+      - name: Test Hugging Face authentication and metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi, hf_hub_url
+
+          token = os.environ.get('HF_TOKEN')
+          print('HF_TOKEN present:', bool(token))
+          if not token:
+              raise SystemExit('HF_TOKEN is missing')
+
+          api = HfApi(token=token)
+          repo = api.dataset_info('ai4bharat/MSMARCO-XI')
+          print('Dataset:', repo.id)
+          print('Dataset SHA:', repo.sha)
+
+          url = hf_hub_url(
+              'ai4bharat/MSMARCO-XI',
+              filename='train/tamtrain.parquet',
+              repo_type='dataset',
+          )
+          print('Parquet URL:', url)
+          PY
+
+      - name: Test direct HTTP HEAD
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+          from huggingface_hub import hf_hub_url
+
+          url = hf_hub_url(
+              'ai4bharat/MSMARCO-XI',
+              filename='train/tamtrain.parquet',
+              repo_type='dataset',
+          )
+          headers = {'Authorization': f"Bearer {os.environ['HF_TOKEN']}"}
+          r = requests.head(url, headers=headers, allow_redirects=True, timeout=30)
+          print('Final URL:', r.url)
+          print('Status:', r.status_code)
+          print('Content-Length:', r.headers.get('content-length'))
+          print('Accept-Ranges:', r.headers.get('accept-ranges'))
+          print('Content-Type:', r.headers.get('content-type'))
+          r.raise_for_status()
+          PY
+
+      - name: Test direct HTTP byte-range download
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+          from huggingface_hub import hf_hub_url
+
+          url = hf_hub_url(
+              'ai4bharat/MSMARCO-XI',
+              filename='train/tamtrain.parquet',
+              repo_type='dataset',
+          )
+          headers = {
+              'Authorization': f"Bearer {os.environ['HF_TOKEN']}",
+              'Range': 'bytes=0-1048575',
+          }
+          print('Requesting first 1 MiB via HTTP Range...')
+          r = requests.get(url, headers=headers, stream=True, allow_redirects=True, timeout=(30, 60))
+          print('Final URL:', r.url)
+          print('Status:', r.status_code)
+          print('Content-Range:', r.headers.get('content-range'))
+          print('Content-Length:', r.headers.get('content-length'))
+          print('Content-Type:', r.headers.get('content-type'))
+          data = next(r.iter_content(chunk_size=1024 * 1024), b'')
+          print('Bytes received:', len(data))
+          r.close()
+          if r.status_code not in (200, 206):
+              raise SystemExit(f'Unexpected HTTP status: {r.status_code}')
+          if not data:
+              raise SystemExit('No bytes received')
+          print('DIRECT RANGE DOWNLOAD: PASS')
+          PY
+
+      - name: Test Hugging Face hub download to local cache
+        if: ${{ inputs.test_mode == 'range' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+
+          print('Attempting hf_hub_download with local cache...')
+          path = hf_hub_download(
+              repo_id='ai4bharat/MSMARCO-XI',
+              filename='train/tamtrain.parquet',
+              repo_type='dataset',
+              token=os.environ['HF_TOKEN'],
+          )
+          print('Downloaded/cached path:', path)
+          PY
+
+      - name: Test full download to disk
+        if: ${{ inputs.test_mode == 'full' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          from huggingface_hub import hf_hub_download
+          import pyarrow.parquet as pq
+
+          start = time.time()
+          print('Starting full Parquet download...')
+          path = hf_hub_download(
+              repo_id='ai4bharat/MSMARCO-XI',
+              filename='train/tamtrain.parquet',
+              repo_type='dataset',
+              token=os.environ['HF_TOKEN'],
+          )
+          elapsed = time.time() - start
+          size = os.path.getsize(path)
+          print(f'Local path: {path}')
+          print(f'File size: {size / (1024**3):.2f} GiB')
+          print(f'Download/cache time: {elapsed:.1f}s')
+
+          print('Opening Parquet metadata...')
+          pf = pq.ParquetFile(path)
+          print('Rows:', pf.metadata.num_rows)
+          print('Row groups:', pf.metadata.num_row_groups)
+          print('Columns:', pf.schema_arrow.names)
+          print('PARQUET OPEN: PASS')
+
+          print('Reading first row group batch...')
+          batch = next(pf.iter_batches(batch_size=1))
+          print('Rows read:', batch.num_rows)
+          print('Columns read:', batch.schema.names)
+          print('PARQUET FIRST ROW: PASS')
+          PY
+
+      - name: Final diagnostic summary
+        run: |
+          echo '========================================='
+          echo 'PARQUET DOWNLOAD DIAGNOSTIC COMPLETED'
+          echo '========================================='
+          echo 'If this workflow reaches this step, the tested download path succeeded.'
+          echo 'The existing build-index workflow has NOT been modified.'
