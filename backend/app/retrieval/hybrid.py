@@ -1,9 +1,7 @@
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 from rank_bm25 import BM25Okapi
-
-from app.retrieval.index_store import DenseIndex
 
 
 @dataclass(slots=True)
@@ -25,7 +23,7 @@ class RetrievedChunk:
 class HybridRetriever:
     """BM25 + FAISS dense retrieval with reciprocal-rank fusion."""
 
-    def __init__(self, chunks: Sequence[IndexedChunk], dense_index: DenseIndex | None = None):
+    def __init__(self, chunks: Sequence[IndexedChunk], dense_index: Any | None = None):
         self.chunks = list(chunks)
         self.dense_index = dense_index
         self._bm25 = BM25Okapi([c.text.lower().split() for c in self.chunks]) if self.chunks else None
