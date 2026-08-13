@@ -1,26 +1,21 @@
 """Build a reproducible RAG index from AI4Bharat MSMARCO-XI data.
 
-The dataset is never committed to GitHub. The builder runs on cloud/CI
-infrastructure, creates four chunking variants, and writes a portable FAISS +
-BM25 artifact bundle.
-
-MSMARCO-XI stores language-specific JSONL files under train/ and
-validation/. We stream the requested file directly so --max-docs does not
-require downloading the multi-GB source file in full.
+The dataset is never committed to GitHub. The builder runs on cloud/CI,
+streams the requested language Parquet file, creates four chunking variants,
+and writes a portable FAISS + BM25 artifact bundle.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from datasets import load_dataset
 import faiss
 import numpy as np
-import requests
 from huggingface_hub import hf_hub_url
 from sentence_transformers import SentenceTransformer
 
@@ -103,27 +98,30 @@ def passage_texts(row: dict[str, Any]) -> list[tuple[str, str]]:
 
 def dataset_filename(config: str, split: str) -> str:
     if split == "train":
-        return f"train/{config}train.jsonl"
+        return f"train/{config}train.parquet"
     if split in {"validation", "val"}:
-        return f"validation/{config}val.jsonl"
+        return f"validation/{config}val.parquet"
     raise ValueError("MSMARCO-XI supports train/validation files")
 
 
-def stream_rows(config: str, split: str, max_docs: int) -> Iterable[dict[str, Any]]:
-    """Stream only the first max_docs JSONL rows from Hugging Face."""
+def stream_rows(config: str, split: str, max_docs: int):
+    """Stream Parquet rows from Hugging Face without downloading the full file."""
     filename = dataset_filename(config, split)
     url = hf_hub_url(DATASET_ID, filename=filename, repo_type="dataset")
-    token = os.getenv("HF_TOKEN")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    token = __import__("os").getenv("HF_TOKEN")
 
-    with requests.get(url, headers=headers, stream=True, timeout=(30, 300)) as response:
-        response.raise_for_status()
-        for idx, raw_line in enumerate(response.iter_lines(decode_unicode=True)):
-            if idx >= max_docs:
-                break
-            if not raw_line or not raw_line.strip():
-                continue
-            yield json.loads(raw_line)
+    dataset = load_dataset(
+        "parquet",
+        data_files={"data": url},
+        split="data",
+        streaming=True,
+        token=token,
+    )
+
+    for idx, row in enumerate(dataset):
+        if idx >= max_docs:
+            break
+        yield row
 
 
 def main() -> None:
