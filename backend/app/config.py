@@ -19,15 +19,15 @@ class Settings(BaseSettings):
     hf_llm_model: str = "Qwen/Qwen3-30B-A3B"
     hf_inference_provider: str = "auto"
     hf_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    hf_reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    hf_reranker_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     hf_dataset_id: str = "ai4bharat/MSMARCO-XI"
 
     index_dir: str = "artifacts/index"
-    index_max_docs: int = 10000
+    index_max_docs: int = 5000
     dense_top_k: int = 20
     lexical_top_k: int = 20
     rerank_top_k: int = 5
-    min_retrieval_score: float = 0.20
+    min_retrieval_score: float = 0.0
     max_context_chars: int = 12000
     benchmark_queries: int = 100
 
