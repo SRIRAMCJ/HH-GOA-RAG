@@ -1,0 +1,141 @@
+name: Diagnose Build Index
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "MSMARCO-XI language code"
+        required: true
+        default: "ta"
+      max_rows:
+        description: "Maximum dataset rows to probe"
+        required: true
+        default: "1"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Show runner resources
+        run: |
+          echo "=== Python ==="
+          python --version
+          echo "=== Memory ==="
+          free -h
+          echo "=== Disk ==="
+          df -h /
+          echo "=== CPU ==="
+          nproc
+
+      - name: Install CPU PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install indexing dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Diagnose imports, Hugging Face access, and first row
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DIAG_CONFIG: ${{ inputs.config }}
+          DIAG_MAX_ROWS: ${{ inputs.max_rows }}
+        run: |
+          python -u - <<'PY'
+          import os
+          import sys
+          import traceback
+          from pathlib import Path
+
+          def probe(name, fn):
+              print(f"\n=== {name} ===", flush=True)
+              try:
+                  value = fn()
+                  print(f"PASS: {name}", flush=True)
+                  if value is not None:
+                      print(value, flush=True)
+                  return True
+              except Exception as exc:
+                  print(f"FAIL: {name}: {type(exc).__name__}: {exc}", flush=True)
+                  traceback.print_exc()
+                  return False
+
+          print("=== DIAGNOSTIC START ===", flush=True)
+          print(f"Python: {sys.version}", flush=True)
+          print(f"Config: {os.environ.get('DIAG_CONFIG')}", flush=True)
+          print(f"Max rows: {os.environ.get('DIAG_MAX_ROWS')}", flush=True)
+          print(f"HF_TOKEN present: {bool(os.environ.get('HF_TOKEN'))}", flush=True)
+
+          probe("import torch", lambda: __import__("torch").__version__)
+          probe("import numpy", lambda: __import__("numpy").__version__)
+          probe("import faiss", lambda: __import__("faiss").__version__)
+          probe("import datasets", lambda: __import__("datasets").__version__)
+          probe("import huggingface_hub", lambda: __import__("huggingface_hub").__version__)
+          probe("import transformers", lambda: __import__("transformers").__version__)
+          probe("import sentence_transformers", lambda: __import__("sentence_transformers").__version__)
+
+          DATASET_ID = "ai4bharat/MSMARCO-XI"
+          stems = {
+              "as": "asm", "bn": "ben", "gu": "guj", "hi": "hin",
+              "kn": "kan", "ml": "mal", "mr": "mar", "ne": "nep",
+              "or": "ori", "pa": "pan", "sa": "san", "ta": "tam",
+              "te": "tel", "ur": "urd",
+          }
+          config = os.environ.get("DIAG_CONFIG", "ta")
+          max_rows = int(os.environ.get("DIAG_MAX_ROWS", "1"))
+          if config not in stems:
+              raise SystemExit(f"Unsupported diagnostic config: {config}")
+          filename = f"train/{stems[config]}train.parquet"
+          print(f"Dataset file under test: {filename}", flush=True)
+
+          def hf_metadata():
+              from huggingface_hub import HfApi
+              info = HfApi(token=os.environ.get("HF_TOKEN")).dataset_info(DATASET_ID)
+              return f"dataset={info.id}, sha={info.sha}"
+          probe("Hugging Face dataset metadata", hf_metadata)
+
+          def hf_url():
+              from huggingface_hub import hf_hub_url
+              import requests
+              url = hf_hub_url(DATASET_ID, filename=filename, repo_type="dataset")
+              response = requests.head(url, headers={"Authorization": f"Bearer {os.environ.get('HF_TOKEN')}"}, allow_redirects=True, timeout=30)
+              return f"status={response.status_code}, final_url_host={response.url.split('/')[2] if '://' in response.url else response.url}"
+          probe("Hugging Face Parquet URL HEAD", hf_url)
+
+          def first_rows():
+              from datasets import load_dataset
+              from huggingface_hub import hf_hub_url
+              url = hf_hub_url(DATASET_ID, filename=filename, repo_type="dataset")
+              dataset = load_dataset(
+                  "parquet",
+                  data_files={"data": url},
+                  split="data",
+                  streaming=True,
+                  token=os.environ.get("HF_TOKEN"),
+              )
+              count = 0
+              for row in dataset:
+                  count += 1
+                  print(f"FIRST ROW {count}: keys={list(row.keys())}", flush=True)
+                  for key in ["query_id", "query", "target_lang", "passages"]:
+                      if key in row:
+                          value = row[key]
+                          text = str(value)
+                          print(f"  {key}: {text[:500]}", flush=True)
+                  if count >= max_rows:
+                      break
+              return f"rows_read={count}"
+          probe("Hugging Face streaming first row(s)", first_rows)
+
+          print("\n=== DIAGNOSTIC END ===", flush=True)
+          PY
