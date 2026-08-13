@@ -10,12 +10,16 @@ on:
       max_docs:
         description: "Number of dataset rows to index"
         required: true
-        default: "5000"
+        default: "1000"
 
 jobs:
   build-index:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,6 +39,18 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Show build configuration
+        run: |
+          python --version
+          python - <<'PY'
+          import os
+          import torch
+          print(f"PyTorch: {torch.__version__}")
+          print(f"Torch threads: {torch.get_num_threads()}")
+          print(f"OMP_NUM_THREADS: {os.getenv('OMP_NUM_THREADS')}")
+          print(f"MKL_NUM_THREADS: {os.getenv('MKL_NUM_THREADS')}")
+          PY
+
       - name: Build index on GitHub runner
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -43,6 +59,7 @@ jobs:
             --config "${{ inputs.config }}" \
             --split train \
             --max-docs "${{ inputs.max_docs }}" \
+            --batch-size 128 \
             --output artifacts/index
 
       - name: Upload index artifact
