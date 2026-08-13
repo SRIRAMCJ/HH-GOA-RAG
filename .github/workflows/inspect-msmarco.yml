@@ -6,7 +6,7 @@ on:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,4 +22,6 @@ jobs:
           pip install "datasets>=3.2,<5" "huggingface-hub>=0.28,<1"
 
       - name: Inspect dataset schema and samples
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/inspect_dataset.py --rows 3
