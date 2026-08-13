@@ -10,7 +10,7 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 COPY backend /app/backend
 COPY frontend /app/frontend
-COPY artifacts /app/artifacts
+RUN mkdir -p /app/artifacts/index
 ENV PYTHONPATH=/app/backend
 ENV PORT=7860
 EXPOSE 7860
