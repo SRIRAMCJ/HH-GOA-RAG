@@ -21,21 +21,33 @@ class HuggingFaceGenerator:
         self.settings = settings
         self.client = InferenceClient(provider=settings.hf_inference_provider, api_key=settings.hf_token)
 
-    def generate(self, query: str, context: str) -> GenerationResult:
+    def _completion(self, query: str, context: str):
         system = (
-            "You are the HH Goa retrieval-grounded answer generator. "
-            "Use ONLY the retrieved context. Never use outside knowledge. "
-            "If the context does not directly support the answer, set grounded=false. "
+            "You are the HH Goa retrieval-grounded answer generator. Use ONLY the retrieved context. "
+            "Never use outside knowledge. If the context does not directly support the answer, set grounded=false. "
             "Return ONLY valid JSON: {\"answer\":\"...\",\"confidence\":0.0,\"grounded\":true}."
         )
         prompt = f"Question:\n{query}\n\nRetrieved context:\n{context}"
-        response = self.client.chat.completions.create(
-            model=self.settings.hf_llm_model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=220,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+        try:
+            return self.client.chat.completions.create(
+                model=self.settings.hf_llm_model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=220,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+        except Exception:
+            # Some inference providers do not accept provider-specific chat_template kwargs.
+            return self.client.chat.completions.create(
+                model=self.settings.hf_llm_model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=220,
+            )
+
+    def generate(self, query: str, context: str) -> GenerationResult:
+        response = self._completion(query, context)
         content = (response.choices[0].message.content or "").strip()
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
         try:
