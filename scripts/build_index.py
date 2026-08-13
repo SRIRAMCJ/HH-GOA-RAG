@@ -22,6 +22,27 @@ from sentence_transformers import SentenceTransformer
 DATASET_ID = "ai4bharat/MSMARCO-XI"
 DEFAULT_EMBEDDING = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
+# The current MSMARCO-XI Hub repository stores the large source files as
+# language-specific Parquet files. The filename stem is not always identical
+# to the two-letter language code (e.g. Gujarati -> gujtrain.parquet,
+# Tamil -> tamtrain.parquet).
+LANGUAGE_FILE_STEMS = {
+    "as": "asm",
+    "bn": "ben",
+    "gu": "guj",
+    "hi": "hin",
+    "kn": "kan",
+    "ml": "mal",
+    "mr": "mar",
+    "ne": "nep",
+    "or": "ori",
+    "pa": "pan",
+    "sa": "san",
+    "ta": "tam",
+    "te": "tel",
+    "ur": "urd",
+}
+
 
 @dataclass
 class Chunk:
@@ -54,7 +75,7 @@ def fixed_chunks(text: str, words: int = 120, overlap: int = 30) -> Iterable[str
 
 
 def make_chunks(document_id: str, text: str, metadata: dict[str, Any]) -> list[Chunk]:
-    """Create the four deterministic chunking variants."""
+    """Create four deterministic chunking variants for evaluation."""
     sents = sentence_split(text)
     chunks: list[Chunk] = []
 
@@ -69,6 +90,9 @@ def make_chunks(document_id: str, text: str, metadata: dict[str, Any]) -> list[C
     if text:
         chunks.append(Chunk(f"{document_id}:metadata:0", document_id, "metadata_aware", text[:1800], metadata))
 
+    # Deterministic semantic proxy: sentence-group windows. The production
+    # benchmark can compare this against a true embedding-based semantic
+    # splitter without changing the index schema.
     for i in range(0, len(sents), 8):
         body = " ".join(sents[i:i + 8])
         if body:
@@ -97,10 +121,16 @@ def passage_texts(row: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def dataset_filename(config: str, split: str) -> str:
+    try:
+        stem = LANGUAGE_FILE_STEMS[config]
+    except KeyError as exc:
+        supported = ", ".join(sorted(LANGUAGE_FILE_STEMS))
+        raise ValueError(f"Unsupported MSMARCO-XI language code '{config}'. Supported: {supported}") from exc
+
     if split == "train":
-        return f"train/{config}train.parquet"
+        return f"train/{stem}train.parquet"
     if split in {"validation", "val"}:
-        return f"validation/{config}val.parquet"
+        return f"validation/{stem}val.parquet"
     raise ValueError("MSMARCO-XI supports train/validation files")
 
 
@@ -182,27 +212,31 @@ def main() -> None:
     index.add(matrix)
     faiss.write_index(index, str(out / "vectors.faiss"))
 
-    with (out / "chunks.jsonl").open("w", encoding="utf-8") as f:
+    with (out / "chunks.jsonl").open("w", encoding="utf-8") as fh:
         for chunk in chunks:
-            f.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
+            fh.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
 
-    with (out / "bm25_tokens.jsonl").open("w", encoding="utf-8") as f:
-        for text in texts:
-            f.write(json.dumps(text.lower().split(), ensure_ascii=False) + "\n")
+    tokenized = [c.text.lower().split() for c in chunks]
+    with (out / "bm25_tokens.jsonl").open("w", encoding="utf-8") as fh:
+        for tokens in tokenized:
+            fh.write(json.dumps(tokens, ensure_ascii=False) + "\n")
 
     manifest = {
         "dataset": DATASET_ID,
-        "source_file": filename,
         "config": args.config,
         "split": args.split,
-        "documents_indexed": rows_read,
+        "source_file": filename,
+        "rows_read": rows_read,
         "chunks": len(chunks),
         "embedding_model": args.embedding_model,
-        "dimension": int(matrix.shape[1]),
+        "embedding_dimension": int(matrix.shape[1]),
         "strategies": sorted({c.strategy for c in chunks}),
+        "index_type": "faiss.IndexFlatIP",
+        "normalized_embeddings": True,
+        "retrieval": ["dense_faiss", "bm25", "rrf"],
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(json.dumps(manifest))
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps(manifest, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
