@@ -62,6 +62,63 @@ jobs:
             --batch-size 128 \
             --output artifacts/index
 
+      - name: Validate generated RAG index
+        working-directory: backend
+        run: |
+          PYTHONPATH=. python - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          from app.retrieval.index_store import DenseIndex
+          from app.retrieval.hybrid import HybridRetriever
+
+          root = Path("../artifacts/index")
+          required = ["vectors.faiss", "chunks.jsonl", "bm25_tokens.jsonl", "manifest.json"]
+          for name in required:
+              path = root / name
+              if not path.exists():
+                  raise RuntimeError(f"Missing index file: {name}")
+              print(f"FOUND {name}: {path.stat().st_size:,} bytes")
+
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          dense = DenseIndex.load(root)
+          if dense is None:
+              raise RuntimeError("DenseIndex.load() returned None")
+
+          print(f"Manifest chunks: {manifest['chunks']}")
+          print(f"FAISS vectors: {dense.index.ntotal}")
+          print(f"Loaded chunks: {len(dense.chunks)}")
+          print(f"FAISS dimension: {dense.index.d}")
+
+          if dense.index.ntotal != len(dense.chunks):
+              raise RuntimeError("FAISS/chunks count mismatch")
+          if dense.index.ntotal != manifest["chunks"]:
+              raise RuntimeError("Manifest/FAISS count mismatch")
+          print("FAISS + chunks: PASS")
+
+          retriever = HybridRetriever(dense.chunks, dense)
+          query = " ".join(dense.chunks[0].text.split()[:12])
+          lexical = retriever.lexical_search(query, top_k=5)
+          if not lexical:
+              raise RuntimeError("BM25 returned no results")
+          print(f"BM25 results: {len(lexical)}")
+          print("BM25: PASS")
+
+          vector = np.asarray(dense.index.reconstruct(0), dtype="float32").reshape(1, -1)
+          dense_results = retriever.dense_search(vector, top_k=5)
+          if not dense_results:
+              raise RuntimeError("FAISS returned no results")
+          print(f"FAISS results: {len(dense_results)}")
+          print("FAISS search: PASS")
+
+          hybrid = retriever.fuse(dense_results, lexical, top_k=5)
+          if not hybrid:
+              raise RuntimeError("Hybrid RRF returned no results")
+          print(f"Hybrid results: {len(hybrid)}")
+          print("RRF hybrid: PASS")
+          print("INDEX VALIDATION PASSED")
+          PY
+
       - name: Upload index artifact
         uses: actions/upload-artifact@v6
         with:
